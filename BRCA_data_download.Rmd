@@ -1,0 +1,208 @@
+---
+output:
+  github_document: default
+  html_document: default
+---
+
+###Downlaoding libraries 
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("SummarizedExperiment")
+BiocManager::install('TCGAbiolinks')
+BiocManager::install('EDASeq')
+
+library(SummarizedExperiment)
+library(TCGAbiolinks)
+library(tidyverse)
+library(dplyr)
+library(AnnotationDbi)
+library(GenomicFeatures)
+library(sesameData)
+library(sesame)
+library(tibble)
+library(stringr)
+library(data.table)
+library(readr)
+```
+
+### BRCA mRNA Data download
+```{r}
+query.exp <- GDCquery(
+  project = "TCGA-BRCA", 
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification", 
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor","Solid Tissue Normal")
+)
+GDCdownload(
+  query = query.exp,
+  files.per.chunk = 100
+)
+
+brca.exp <- GDCprepare(
+  query = query.exp)
+
+# get subtype information
+information.subtype <- TCGAquery_subtype(tumor = "BRCA")
+
+# get clinical data
+information.clinical <- GDCquery_clinic(project = "TCGA-BRCA",type = "clinical") 
+
+
+# Which samples are Primary Tumor
+samples.primary.tumour <- brca.exp$barcode[brca.exp$shortLetterCode == "TP"]
+
+# which samples are solid tissue normal
+samples.solid.tissue.normal <- brca.exp$barcode[brca.exp$shortLetterCode == "NT"]
+
+
+#Preproccesing specific genes beforehand 
+dataPrep <- TCGAanalyze_Preprocessing(
+  object = brca.exp, 
+  cor.cut = 0.6
+)                      
+
+dataNorm <- TCGAanalyze_Normalization(
+  tabDF = dataPrep,
+  geneInfo = geneInfoHT,
+  method = "gcContent"
+)                
+
+dataFilt <- TCGAanalyze_Filtering(
+  tabDF = dataNorm,
+  method = "quantile", 
+  qnt.cut =  0.25
+) 
+
+
+#Getting tumor samples values to differentiate and check the number of non-tumor samples
+BRCA_labels <- as.integer( colnames(dataFilt) %in% samples.primary.tumour )
+df_vec <- data.frame(Value = BRCA_labels, barcode = substring(colnames(dataFilt),1,16))
+df_vec <- distinct(df_vec,barcode, .keep_all = TRUE)
+```
+
+###miRNA download
+```{r}
+query_mirna <- GDCquery(
+  project = "TCGA-BRCA", 
+  data.category = "Transcriptome Profiling",
+  data.type = "miRNA Expression Quantification", 
+  experimental.strategy = "miRNA-Seq",
+  sample.type = c("Primary Tumor","Solid Tissue Normal")
+)
+GDCdownload(query_mirna)
+data <- GDCprepare(query_mirna)
+miRNA <- as.matrix(assay(SummarizedExperiment(data)))
+
+miRNA <- as.data.frame(miRNA)
+miRNA <- column_to_rownames(miRNA, "miRNA_ID")
+miRNA <- miRNA %>% dplyr::select(contains('per_million'))
+miRNA  <- as.matrix(miRNA)
+miRNA <- t(miRNA)
+row.names(miRNA) <- substring(row.names(miRNA),32,47)
+class(miRNA) <- "numeric"
+
+miRNA_barcode <- row.names(miRNA)
+mRNA_barcode <- substring(colnames(dataFilt),1,16)
+
+multimodal_barcode <- miRNA_barcode[miRNA_barcode %in% mRNA_barcode]
+
+
+filtered_df_vecs <- df_vec %>%
+  filter(barcode %in% multimodal_barcode)
+filtered_df_vecs <- distinct(filtered_df_vecs,barcode, .keep_all = TRUE)
+```
+###Downloading methylation data
+
+```{r}
+
+query_met_BRCA <- GDCquery(project= "TCGA-BRCA", 
+                           data.category = "DNA Methylation", data.type = "Methylation Beta Value",
+                           platform = "Illumina Human Methylation 450")
+GDCdownload(query_met_BRCA)
+data.brca <- GDCprepare(query_met_BRCA) #If it gives an error, go download the updated TCGAbiolinks version on Github: BiocManager::install("BioinformaticsFMRP/TCGAbiolinks")
+clin_meth <- as.data.frame(data.table(as.data.frame(colData(data.brca))))
+meth <- as.matrix(data.table(t(assay(data.brca,withDimnames=TRUE))))
+
+meth_barcode <- substring(clin_meth$barcode,1,16)
+multimodal_barcode2 <- meth_barcode[meth_barcode %in% multimodal_barcode]
+
+filtered_df_vecs2 <- df_vec %>%
+  filter(barcode %in% multimodal_barcode2)
+filtered_df_vecs2 <- distinct(filtered_df_vecs2,barcode, .keep_all = TRUE)
+
+```
+
+###Protein expression download 
+```{r}
+
+query.proteome <- GDCquery(
+  project = "TCGA-BRCA", 
+  data.category = "Proteome Profiling",
+  data.type = "Protein Expression Quantification", 
+  sample.type = c("Primary Tumor","Solid Tissue Normal"))
+GDCdownload(query.proteome)
+proteome <- GDCprepare(query.proteome)
+
+
+proteome_barcode <- colnames(proteome[6:919])
+multimodal_barcode3 <- proteome_barcode[proteome_barcode%in% multimodal_barcode2]
+filtered_df_vecs3 <- df_vec %>%
+  filter(barcode %in% multimodal_barcode3)
+filtered_df_vecs3 <- distinct(filtered_df_vecs3,barcode, .keep_all = TRUE)
+filtered_df_vecs4 <- as.matrix(filtered_df_vecs3)
+save(filtered_df_vecs4, file = "~/Desktop/BRCA_project/Data/df_vecs.RData")
+```
+
+###Saving multimodal data
+```{r}
+new_dataframe <- proteome %>% dplyr::select(multimodal_barcode3)
+proteome2 <- cbind(proteome$peptide_target,new_dataframe)
+proteome2 <- column_to_rownames(proteome2, "proteome$peptide_target")
+proteome2 <- t(proteome2)
+proteome2 <- as.data.frame(proteome2)
+proteome2 <- rownames_to_column(proteome2,var = "barcode")
+proteome_multimodal <- as.matrix(proteome2)
+
+save(proteome_multimodal, file = "~/Desktop/BRCA_project/Data/BRCA_proteome.RData")
+
+save(meth, file = "~/Desktop/BRCA_project/Data/BRCA_meth.RData")
+
+subtype_multimodal <- information.subtype %>%
+  filter(patient %in% substring(multimodal_barcode3,1,12))
+save(subtype_multimodal, file = "~/Desktop/BRCA_project/Data/subtype.RData")
+
+mrna_multimodal <- t(dataFilt)
+mrna_multimodal <- as.data.frame(mrna_multimodal)
+mrna_multimodal <- rownames_to_column(mrna_multimodal,var = "barcode")
+mrna_multimodal$barcode <- substring(mrna_multimodal$barcode,1,16)
+mrna_multimodal <- mrna_multimodal %>% filter(barcode %in% multimodal_barcode3)
+mrna_multimodal <- distinct(mrna_multimodal,barcode,.keep_all = TRUE)
+mrna_multimodal <- as.matrix(mrna_multimodal)
+save(mrna_multimodal, file = "~/Desktop/BRCA_project/Data/BRCA_mrna.RData")
+
+miRNA <- as.data.frame(miRNA)
+miRNA <- rownames_to_column(miRNA, var = "barcode")
+miRNA$barcode <- gsub("\\.", "-",miRNA$barcode)
+mirna_multimodal <- miRNA %>% filter(barcode %in% multimodal_barcode3)
+mirna_multimodal <- distinct(mirna_multimodal,barcode,.keep_all = TRUE)
+mirna_multimodal <- as.matrix(mirna_multimodal)
+save(mirna_multimodal, file = "~/Desktop/BRCA_project/Data/BRCA_mirna.RData")
+
+meth_multimodal <- as.data.frame(meth)
+meth_multimodal <- cbind(barcode = clin_meth$barcode, meth_multimodal)
+meth_multimodal$barcode <- substring(meth_multimodal$barcode,1,16)
+
+meth_multimodal <- meth_multimodal %>% filter(barcode %in% multimodal_barcode3)
+meth_multimodal <- distinct(meth_multimodal,barcode,.keep_all = TRUE)
+meth_multimodal <- as.matrix(meth_multimodal)
+save(meth_multimodal, file = "~/Desktop/BRCA_project/Data/BRCA_meth.RData")
+
+```
+
+
+
+
+
+
